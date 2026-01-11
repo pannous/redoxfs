@@ -35,4 +35,9 @@ impl<T: Read + Write + Seek> Disk for DiskIo<T> {
         let size = try_disk!(self.0.seek(SeekFrom::End(0)));
         Ok(size)
     }
+
+    fn flush(&mut self) -> Result<()> {
+        try_disk!(self.0.flush());
+        Ok(())
+    }
 }

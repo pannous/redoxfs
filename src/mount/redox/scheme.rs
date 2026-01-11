@@ -287,12 +287,16 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
                                 Node::MODE_FILE
                             };
 
+                            let extracted_mode = flags as u16 & Node::MODE_PERM;
+                            let final_mode = mode_type | extracted_mode;
+                            log::info!("CREATE: flags=0x{:x}, extracted_mode=0o{:o}, final_mode=0o{:o}", flags, extracted_mode, final_mode);
+
                             let node_ptr = self.fs.tx(|tx| {
                                 let ctime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
                                 let mut node = tx.create_node(
                                     parent.ptr(),
                                     &last_part,
-                                    mode_type | (flags as u16 & Node::MODE_PERM),
+                                    final_mode,
                                     ctime.as_secs(),
                                     ctime.subsec_nanos(),
                                 )?;

@@ -312,6 +312,9 @@ impl<'a, D: Disk> Transaction<'a, D> {
             return Err(Error::new(EIO));
         }
 
+        // Flush all writes to stable storage
+        self.fs.disk.flush()?;
+
         self.header_changed = false;
         Ok(true)
     }

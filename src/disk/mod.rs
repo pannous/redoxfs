@@ -38,4 +38,9 @@ pub trait Disk {
 
     /// Get size of disk in bytes
     fn size(&mut self) -> Result<u64>;
+
+    /// Flush all pending writes to stable storage
+    fn flush(&mut self) -> Result<()> {
+        Ok(()) // Default no-op for backwards compatibility
+    }
 }
