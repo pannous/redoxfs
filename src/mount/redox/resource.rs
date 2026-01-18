@@ -148,6 +148,8 @@ pub trait Resource<D: Disk> {
 pub struct Entry {
     pub node_ptr: TreePtr<Node>,
     pub name: String,
+    pub inode: u64,
+    pub mode: u16,
 }
 
 pub struct DirResource {
@@ -249,22 +251,21 @@ impl<D: Disk> Resource<D> for DirResource {
         &mut self,
         mut buf: DirentBuf<&'buf mut [u8]>,
         opaque_offset: u64,
-        tx: &mut Transaction<D>,
+        _tx: &mut Transaction<D>,
     ) -> Result<DirentBuf<&'buf mut [u8]>> {
         match &self.data {
             Some(data) => {
                 let opaque_offset = opaque_offset as usize;
                 for (idx, entry) in data.iter().enumerate().skip(opaque_offset) {
-                    let child = tx.read_tree(entry.node_ptr)?;
+                    // Use cached inode and mode instead of reading the child node
                     let result = buf.entry(DirEntry {
-                        inode: child.id() as u64,
+                        inode: entry.inode,
                         next_opaque_id: idx as u64 + 1,
                         name: &entry.name,
-                        kind: match child.data().mode() & Node::MODE_TYPE {
+                        kind: match entry.mode & Node::MODE_TYPE {
                             Node::MODE_DIR => DirentKind::Directory,
                             Node::MODE_FILE => DirentKind::Regular,
                             Node::MODE_SYMLINK => DirentKind::Symlink,
-                            //TODO: more types?
                             _ => DirentKind::Unspecified,
                         },
                     });

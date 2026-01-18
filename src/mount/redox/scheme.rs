@@ -170,15 +170,23 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
                         let mut children = Vec::new();
                         self.fs.tx(|tx| tx.child_nodes(node.ptr(), &mut children))?;
 
-                        let mut data = Vec::new();
-                        for child in children.iter() {
-                            if let Some(child_name) = child.name() {
-                                data.push(Entry {
-                                    node_ptr: child.node_ptr(),
-                                    name: child_name.to_string(),
-                                });
+                        // Populate Entry structs with cached inode/mode to avoid
+                        // re-reading nodes during subsequent getdents calls
+                        let data = self.fs.tx(|tx| {
+                            let mut data = Vec::new();
+                            for child in children.iter() {
+                                if let Some(child_name) = child.name() {
+                                    let child_node = tx.read_tree(child.node_ptr())?;
+                                    data.push(Entry {
+                                        node_ptr: child.node_ptr(),
+                                        name: child_name.to_string(),
+                                        inode: child_node.id() as u64,
+                                        mode: child_node.data().mode(),
+                                    });
+                                }
                             }
-                        }
+                            Ok(data)
+                        })?;
 
                         Box::new(DirResource::new(
                             path.to_string(),
