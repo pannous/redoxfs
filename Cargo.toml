@@ -80,6 +80,8 @@ std = [
     "redox_syscall/std",
     "redox-scheme",
 ]
+# Skip hash verification on block reads for maximum performance (UNSAFE - no data integrity checks)
+skip-hash-verify = []
 
 [target.'cfg(not(target_os = "redox"))'.dependencies]
 fuser = { version = "0.16", optional = true }

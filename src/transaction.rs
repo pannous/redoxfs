@@ -356,17 +356,20 @@ impl<'a, D: Disk> Transaction<'a, D> {
         }
 
         let block = BlockData::new(ptr.addr(), data);
-        let block_ptr = block.create_ptr();
-        if block_ptr.hash() != ptr.hash() {
-            // Incorrect hash
-            #[cfg(feature = "log")]
-            log::error!(
-                "READ_BLOCK: INCORRECT HASH 0x{:X} != 0x{:X} for block 0x{:X}",
-                block_ptr.hash(),
-                ptr.hash(),
-                ptr.addr().index()
-            );
-            return Err(Error::new(EIO));
+        #[cfg(not(feature = "skip-hash-verify"))]
+        {
+            let block_ptr = block.create_ptr();
+            if block_ptr.hash() != ptr.hash() {
+                // Incorrect hash
+                #[cfg(feature = "log")]
+                log::error!(
+                    "READ_BLOCK: INCORRECT HASH 0x{:X} != 0x{:X} for block 0x{:X}",
+                    block_ptr.hash(),
+                    ptr.hash(),
+                    ptr.addr().index()
+                );
+                return Err(Error::new(EIO));
+            }
         }
         Ok(block)
     }
