@@ -14,7 +14,7 @@ use syscall::flag::{
 };
 use syscall::{EBADFD, PAGE_SIZE};
 
-use crate::{Disk, Node, Transaction, TreePtr, BLOCK_SIZE};
+use crate::{Disk, Node, ReadOnlyContext, Transaction, TreePtr, BLOCK_SIZE};
 
 pub type Fmaps = BTreeMap<u32, FileMmapInfo>;
 
@@ -119,6 +119,34 @@ pub trait Resource<D: Disk> {
             st_size: node.data().size(),
             st_blksize: 512,
             // Blocks is in 512 byte blocks, not in our block size
+            st_blocks: node.data().blocks() * (BLOCK_SIZE / 512),
+            st_mtime: mtime.0,
+            st_mtime_nsec: mtime.1,
+            st_atime: atime.0,
+            st_atime_nsec: atime.1,
+            st_ctime: ctime.0,
+            st_ctime_nsec: ctime.1,
+        };
+
+        Ok(())
+    }
+
+    /// Read-only stat using lightweight context (no transaction overhead)
+    fn stat_readonly(&self, stat: &mut Stat, ctx: &mut ReadOnlyContext<D>) -> Result<()> {
+        let node = ctx.read_tree(self.node_ptr())?;
+
+        let ctime = node.data().ctime();
+        let mtime = node.data().mtime();
+        let atime = node.data().atime();
+        *stat = Stat {
+            st_dev: 0,
+            st_ino: node.id() as u64,
+            st_mode: node.data().mode(),
+            st_nlink: node.data().links(),
+            st_uid: node.data().uid(),
+            st_gid: node.data().gid(),
+            st_size: node.data().size(),
+            st_blksize: 512,
             st_blocks: node.data().blocks() * (BLOCK_SIZE / 512),
             st_mtime: mtime.0,
             st_mtime_nsec: mtime.1,

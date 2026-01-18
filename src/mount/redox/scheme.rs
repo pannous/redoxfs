@@ -875,9 +875,9 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
             return Ok(());
         }
 
-        // Cache miss - do full stat and cache the result
-        self.fs.tx(|tx| {
-            file.stat(stat, tx)
+        // Cache miss - use lightweight read-only context (no transaction overhead)
+        self.fs.read_only(|ctx| {
+            file.stat_readonly(stat, ctx)
         })?;
 
         // Cache the metadata

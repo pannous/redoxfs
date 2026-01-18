@@ -270,6 +270,17 @@ impl<D: Disk> FileSystem<D> {
         Ok(t)
     }
 
+    /// Execute a read-only operation without transaction overhead.
+    /// No allocator clone, no commit - significantly faster for stat() operations.
+    /// Note: Still requires `&mut self` because Disk::read_at requires mutable access.
+    pub fn read_only<F, T>(&mut self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut crate::ReadOnlyContext<D>) -> Result<T>,
+    {
+        let mut ctx = crate::ReadOnlyContext::new(self);
+        f(&mut ctx)
+    }
+
     pub fn allocator(&self) -> &Allocator {
         &self.allocator
     }

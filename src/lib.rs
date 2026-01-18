@@ -38,7 +38,7 @@ pub use self::key::{Key, KeySlot, Salt};
 pub use self::mount::mount;
 pub use self::node::{Node, NodeFlags, NodeLevel, NodeLevelData};
 pub use self::record::RecordRaw;
-pub use self::transaction::Transaction;
+pub use self::transaction::{ReadOnlyContext, Transaction};
 pub use self::tree::{Tree, TreeData, TreeList, TreePtr};
 #[cfg(feature = "std")]
 pub use self::unmount::unmount_path;

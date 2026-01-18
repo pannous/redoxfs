@@ -76,6 +76,103 @@ pub struct Transaction<'a, D: Disk> {
     pub(crate) write_cache: BTreeMap<BlockAddr, Box<[u8]>>,
 }
 
+/// Lightweight read-only context for stat() and other read-only operations.
+/// No allocator clone, no write_cache, no commit overhead.
+/// Still requires &mut FileSystem because Disk::read_at needs &mut self.
+pub struct ReadOnlyContext<'a, D: Disk> {
+    pub(crate) fs: &'a mut FileSystem<D>,
+}
+
+impl<'a, D: Disk> ReadOnlyContext<'a, D> {
+    pub fn new(fs: &'a mut FileSystem<D>) -> Self {
+        Self { fs }
+    }
+
+    /// Read a block directly from disk (no write cache check needed for read-only ops)
+    pub fn read_block<T: BlockTrait + core::ops::DerefMut<Target = [u8]>>(
+        &mut self,
+        ptr: BlockPtr<T>,
+    ) -> Result<BlockData<T>> {
+        if ptr.is_null() {
+            #[cfg(feature = "log")]
+            log::error!("READ_BLOCK_RO: POINTER IS NULL");
+            return Err(Error::new(ENOENT));
+        }
+
+        let mut data = match T::empty(ptr.addr().level()) {
+            Some(some) => some,
+            None => {
+                #[cfg(feature = "log")]
+                log::error!("READ_BLOCK_RO: INVALID BLOCK LEVEL FOR TYPE");
+                return Err(Error::new(ENOENT));
+            }
+        };
+
+        // Read directly from disk - no write_cache for read-only operations
+        let count = unsafe {
+            self.fs
+                .disk
+                .read_at(self.fs.block + ptr.addr().index(), &mut data)?
+        };
+        if count != data.len() {
+            #[cfg(feature = "log")]
+            log::error!("READ_BLOCK_RO: WRONG NUMBER OF BYTES");
+            return Err(Error::new(EIO));
+        }
+
+        // Decrypt if needed
+        self.fs.decrypt(&mut data, ptr.addr());
+
+        let block = BlockData::new(ptr.addr(), data);
+        #[cfg(not(feature = "skip-hash-verify"))]
+        {
+            let block_ptr = block.create_ptr();
+            if block_ptr.hash() != ptr.hash() {
+                #[cfg(feature = "log")]
+                log::error!(
+                    "READ_BLOCK_RO: INCORRECT HASH 0x{:X} != 0x{:X} for block 0x{:X}",
+                    block_ptr.hash(),
+                    ptr.hash(),
+                    ptr.addr().index()
+                );
+                return Err(Error::new(EIO));
+            }
+        }
+        Ok(block)
+    }
+
+    /// Walk the tree and return the contents of the data block (read-only version)
+    pub fn read_tree<T: BlockTrait + core::ops::DerefMut<Target = [u8]>>(
+        &mut self,
+        ptr: TreePtr<T>,
+    ) -> Result<TreeData<T>> {
+        if ptr.is_null() {
+            #[cfg(feature = "log")]
+            log::error!("READ_TREE_RO: ID IS NULL");
+            return Err(Error::new(ENOENT));
+        }
+
+        let (i3, i2, i1, i0) = ptr.indexes();
+        let l3 = self.read_block(self.fs.header.tree)?;
+        let l2 = self.read_block(l3.data().ptrs[i3])?;
+        let l1 = self.read_block(l2.data().ptrs[i2])?;
+        let l0 = self.read_block(l1.data().ptrs[i1])?;
+        let raw = self.read_block(l0.data().ptrs[i0])?;
+
+        let mut data = match T::empty(BlockLevel::default()) {
+            Some(some) => some,
+            None => {
+                #[cfg(feature = "log")]
+                log::error!("READ_TREE_RO: INVALID BLOCK LEVEL FOR TYPE");
+                return Err(Error::new(ENOENT));
+            }
+        };
+        data.copy_from_slice(raw.data());
+
+        Ok(TreeData::new(ptr.id(), data))
+    }
+}
+
 impl<'a, D: Disk> Transaction<'a, D> {
     pub(crate) fn new(fs: &'a mut FileSystem<D>) -> Self {
         let header = fs.header;
