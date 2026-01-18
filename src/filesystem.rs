@@ -18,6 +18,25 @@ fn compress_cache() -> Box<[u8]> {
     vec![0; lz4_flex::block::get_maximum_output_size(RECORD_SIZE as usize)].into_boxed_slice()
 }
 
+/// Cached node metadata for fast stat operations
+#[derive(Clone, Copy)]
+pub struct CachedNodeMeta {
+    pub mode: u16,
+    pub uid: u32,
+    pub gid: u32,
+    pub links: u32,
+    pub size: u64,
+    pub blocks: u64,
+    pub ctime: u64,
+    pub ctime_nsec: u32,
+    pub mtime: u64,
+    pub mtime_nsec: u32,
+    pub atime: u64,
+    pub atime_nsec: u32,
+}
+
+const NODE_CACHE_SIZE: usize = 1024;
+
 /// A file system
 pub struct FileSystem<D: Disk> {
     //TODO: make private
@@ -30,6 +49,8 @@ pub struct FileSystem<D: Disk> {
     pub(crate) cipher_opt: Option<Xts128<Aes128>>,
     pub(crate) compress_cache: Box<[u8]>,
     pub node_usages: BTreeMap<u32, u64>,
+    /// LRU cache for node metadata (block_addr -> metadata)
+    pub(crate) node_meta_cache: VecDeque<(u64, CachedNodeMeta)>,
 }
 
 impl<D: Disk> FileSystem<D> {
@@ -96,6 +117,7 @@ impl<D: Disk> FileSystem<D> {
                 cipher_opt,
                 compress_cache: compress_cache(),
                 node_usages: BTreeMap::new(),
+                node_meta_cache: VecDeque::with_capacity(NODE_CACHE_SIZE),
             };
 
             unsafe { fs.reset_allocator()? };
@@ -179,6 +201,7 @@ impl<D: Disk> FileSystem<D> {
             cipher_opt,
             compress_cache: compress_cache(),
             node_usages: BTreeMap::new(),
+            node_meta_cache: VecDeque::with_capacity(NODE_CACHE_SIZE),
         };
 
         // Write header generation zero
@@ -327,5 +350,34 @@ impl<D: Disk> FileSystem<D> {
             // Do nothing if encryption is disabled
             false
         }
+    }
+
+    /// Look up cached node metadata by block address
+    pub fn get_cached_node_meta(&self, block_addr: u64) -> Option<CachedNodeMeta> {
+        for (addr, meta) in &self.node_meta_cache {
+            if *addr == block_addr {
+                return Some(*meta);
+            }
+        }
+        None
+    }
+
+    /// Insert node metadata into cache (LRU eviction if full)
+    pub fn cache_node_meta(&mut self, block_addr: u64, meta: CachedNodeMeta) {
+        // Remove existing entry if present (will be re-added at front)
+        self.node_meta_cache.retain(|(addr, _)| *addr != block_addr);
+
+        // Add to front (most recently used)
+        self.node_meta_cache.push_front((block_addr, meta));
+
+        // Evict oldest if over capacity
+        while self.node_meta_cache.len() > NODE_CACHE_SIZE {
+            self.node_meta_cache.pop_back();
+        }
+    }
+
+    /// Invalidate cached metadata for a node (call on write)
+    pub fn invalidate_node_meta(&mut self, block_addr: u64) {
+        self.node_meta_cache.retain(|(addr, _)| *addr != block_addr);
     }
 }

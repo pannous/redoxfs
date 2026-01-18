@@ -24,7 +24,7 @@ use redox_path::{
     RedoxPath,
 };
 
-use crate::{Disk, FileSystem, Node, Transaction, TreeData, TreePtr, BLOCK_SIZE};
+use crate::{CachedNodeMeta, Disk, FileSystem, Node, Transaction, TreeData, TreePtr, BLOCK_SIZE};
 
 use super::resource::{DirResource, Entry, FileMmapInfo, FileResource, Resource};
 
@@ -547,7 +547,12 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
     ) -> Result<usize> {
         // println!("Write {}, {:X} {}", id, buf.as_ptr() as usize, buf.len());
         let file = self.files.get_mut(&id).ok_or(Error::new(EBADF))?;
-        self.fs.tx(|tx| file.write(buf, offset, tx))
+        let block_addr = file.node_ptr().id() as u64;
+        let result = self.fs.tx(|tx| file.write(buf, offset, tx));
+        if result.is_ok() {
+            self.fs.invalidate_node_meta(block_addr);
+        }
+        result
     }
 
     fn fsize(&mut self, id: usize, _ctx: &CallerCtx) -> Result<u64> {
@@ -558,7 +563,12 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
 
     fn fchmod(&mut self, id: usize, mode: u16, _ctx: &CallerCtx) -> Result<()> {
         if let Some(file) = self.files.get_mut(&id) {
-            self.fs.tx(|tx| file.fchmod(mode, tx))
+            let block_addr = file.node_ptr().id() as u64;
+            let result = self.fs.tx(|tx| file.fchmod(mode, tx));
+            if result.is_ok() {
+                self.fs.invalidate_node_meta(block_addr);
+            }
+            result
         } else {
             Err(Error::new(EBADF))
         }
@@ -566,7 +576,12 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
 
     fn fchown(&mut self, id: usize, new_uid: u32, new_gid: u32, _ctx: &CallerCtx) -> Result<()> {
         if let Some(file) = self.files.get_mut(&id) {
-            self.fs.tx(|tx| file.fchown(new_uid, new_gid, tx))
+            let block_addr = file.node_ptr().id() as u64;
+            let result = self.fs.tx(|tx| file.fchown(new_uid, new_gid, tx));
+            if result.is_ok() {
+                self.fs.invalidate_node_meta(block_addr);
+            }
+            result
         } else {
             Err(Error::new(EBADF))
         }
@@ -834,17 +849,54 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
 
     fn fstat(&mut self, id: usize, stat: &mut Stat, _ctx: &CallerCtx) -> Result<()> {
         // println!("Fstat {}, {:X}", id, stat as *mut Stat as usize);
-        let start = std::time::Instant::now();
-        let result = if let Some(file) = self.files.get(&id) {
-            self.fs.tx(|tx| file.stat(stat, tx))
-        } else {
-            Err(Error::new(EBADF))
-        };
-        let elapsed = start.elapsed();
-        if elapsed.as_millis() > 10 {
-            log::warn!("fstat took {}ms", elapsed.as_millis());
+        let file = self.files.get(&id).ok_or(Error::new(EBADF))?;
+        let node_ptr = file.node_ptr();
+        let block_addr = node_ptr.id() as u64;
+
+        // Check cache first
+        if let Some(cached) = self.fs.get_cached_node_meta(block_addr) {
+            *stat = Stat {
+                st_dev: 0,
+                st_ino: node_ptr.id() as u64,
+                st_mode: cached.mode,
+                st_nlink: cached.links,
+                st_uid: cached.uid,
+                st_gid: cached.gid,
+                st_size: cached.size,
+                st_blksize: 512,
+                st_blocks: cached.blocks * (BLOCK_SIZE / 512),
+                st_mtime: cached.mtime,
+                st_mtime_nsec: cached.mtime_nsec,
+                st_atime: cached.atime,
+                st_atime_nsec: cached.atime_nsec,
+                st_ctime: cached.ctime,
+                st_ctime_nsec: cached.ctime_nsec,
+            };
+            return Ok(());
         }
-        result
+
+        // Cache miss - do full stat and cache the result
+        self.fs.tx(|tx| {
+            file.stat(stat, tx)
+        })?;
+
+        // Cache the metadata
+        self.fs.cache_node_meta(block_addr, CachedNodeMeta {
+            mode: stat.st_mode,
+            uid: stat.st_uid,
+            gid: stat.st_gid,
+            links: stat.st_nlink,
+            size: stat.st_size,
+            blocks: stat.st_blocks / (BLOCK_SIZE / 512),
+            ctime: stat.st_ctime,
+            ctime_nsec: stat.st_ctime_nsec,
+            mtime: stat.st_mtime,
+            mtime_nsec: stat.st_mtime_nsec,
+            atime: stat.st_atime,
+            atime_nsec: stat.st_atime_nsec,
+        });
+
+        Ok(())
     }
 
     fn fstatvfs(&mut self, id: usize, stat: &mut StatVfs, _ctx: &CallerCtx) -> Result<()> {
@@ -871,7 +923,12 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
     fn ftruncate(&mut self, id: usize, len: u64, _ctx: &CallerCtx) -> Result<()> {
         // println!("Ftruncate {}, {}", id, len);
         if let Some(file) = self.files.get_mut(&id) {
-            self.fs.tx(|tx| file.truncate(len, tx))
+            let block_addr = file.node_ptr().id() as u64;
+            let result = self.fs.tx(|tx| file.truncate(len, tx));
+            if result.is_ok() {
+                self.fs.invalidate_node_meta(block_addr);
+            }
+            result
         } else {
             Err(Error::new(EBADF))
         }
@@ -880,7 +937,12 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
     fn futimens(&mut self, id: usize, times: &[TimeSpec], _ctx: &CallerCtx) -> Result<()> {
         // println!("Futimens {}, {}", id, times.len());
         if let Some(file) = self.files.get_mut(&id) {
-            self.fs.tx(|tx| file.utimens(times, tx))
+            let block_addr = file.node_ptr().id() as u64;
+            let result = self.fs.tx(|tx| file.utimens(times, tx));
+            if result.is_ok() {
+                self.fs.invalidate_node_meta(block_addr);
+            }
+            result
         } else {
             Err(Error::new(EBADF))
         }

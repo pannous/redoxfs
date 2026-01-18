@@ -31,7 +31,7 @@ pub use self::block::{
 pub use self::clone::clone;
 pub use self::dir::{DirEntry, DirList};
 pub use self::disk::*;
-pub use self::filesystem::FileSystem;
+pub use self::filesystem::{CachedNodeMeta, FileSystem};
 pub use self::header::{Header, HEADER_RING};
 pub use self::key::{Key, KeySlot, Salt};
 #[cfg(feature = "std")]
