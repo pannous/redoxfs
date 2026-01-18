@@ -826,11 +826,17 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
 
     fn fstat(&mut self, id: usize, stat: &mut Stat, _ctx: &CallerCtx) -> Result<()> {
         // println!("Fstat {}, {:X}", id, stat as *mut Stat as usize);
-        if let Some(file) = self.files.get(&id) {
+        let start = std::time::Instant::now();
+        let result = if let Some(file) = self.files.get(&id) {
             self.fs.tx(|tx| file.stat(stat, tx))
         } else {
             Err(Error::new(EBADF))
+        };
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 10 {
+            log::warn!("fstat took {}ms", elapsed.as_millis());
         }
+        result
     }
 
     fn fstatvfs(&mut self, id: usize, stat: &mut StatVfs, _ctx: &CallerCtx) -> Result<()> {
