@@ -35,6 +35,29 @@ pub struct CachedNodeMeta {
     pub atime_nsec: u32,
 }
 
+impl CachedNodeMeta {
+    /// Create CachedNodeMeta from a Node
+    pub fn from_node(node: &crate::Node) -> Self {
+        let (ctime, ctime_nsec) = node.ctime();
+        let (mtime, mtime_nsec) = node.mtime();
+        let (atime, atime_nsec) = node.atime();
+        Self {
+            mode: node.mode(),
+            uid: node.uid(),
+            gid: node.gid(),
+            links: node.links(),
+            size: node.size(),
+            blocks: node.blocks(),
+            ctime,
+            ctime_nsec,
+            mtime,
+            mtime_nsec,
+            atime,
+            atime_nsec,
+        }
+    }
+}
+
 const NODE_CACHE_SIZE: usize = 1024;
 
 /// A file system
@@ -278,6 +301,17 @@ impl<D: Disk> FileSystem<D> {
         F: FnOnce(&mut crate::ReadOnlyContext<D>) -> Result<T>,
     {
         let mut ctx = crate::ReadOnlyContext::new(self);
+        f(&mut ctx)
+    }
+
+    /// Execute a read-only operation with tree node caching.
+    /// Ideal for batch operations like directory listing where multiple nodes
+    /// share tree ancestors. Caches L3/L2/L1/L0 tree nodes to minimize disk reads.
+    pub fn read_only_with_cache<F, T>(&mut self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut crate::transaction::CachedReadOnlyContext<D>) -> Result<T>,
+    {
+        let mut ctx = crate::transaction::CachedReadOnlyContext::new(self);
         f(&mut ctx)
     }
 

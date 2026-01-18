@@ -88,6 +88,11 @@ impl<'a, D: Disk> ReadOnlyContext<'a, D> {
         Self { fs }
     }
 
+    /// Get the filesystem header (for cached context to access tree root)
+    pub fn header(&self) -> &crate::Header {
+        &self.fs.header
+    }
+
     /// Read a block directly from disk (no write cache check needed for read-only ops)
     pub fn read_block<T: BlockTrait + core::ops::DerefMut<Target = [u8]>>(
         &mut self,
@@ -170,6 +175,229 @@ impl<'a, D: Disk> ReadOnlyContext<'a, D> {
         data.copy_from_slice(raw.data());
 
         Ok(TreeData::new(ptr.id(), data))
+    }
+}
+
+/// Read-only context with tree node caching for batch operations.
+/// Uses single-entry "last used" caches for O(1) lookups - optimal for
+/// sequential node accesses like directory listings.
+///
+/// Tree structure (Tree = TreeList<TreeList<TreeList<TreeList<BlockRaw>>>>):
+/// - L3 (Tree): header.tree -> single root block
+/// - L2: l3.ptrs[i3] -> TreeList<TreeList<TreeList<BlockRaw>>>
+/// - L1: l2.ptrs[i2] -> TreeList<TreeList<BlockRaw>>
+/// - L0: l1.ptrs[i1] -> TreeList<BlockRaw>
+/// - Data: l0.ptrs[i0] -> BlockRaw (not cached, unique per node)
+pub struct CachedReadOnlyContext<'a, D: Disk> {
+    pub(crate) fs: &'a mut FileSystem<D>,
+    // L3 cache: Tree root (always the same)
+    l3_cache: Option<BlockData<crate::Tree>>,
+    // L2 cache: last used (i3, block)
+    l2_cache: Option<(usize, BlockData<crate::TreeList<crate::TreeList<crate::TreeList<crate::BlockRaw>>>>)>,
+    // L1 cache: last used ((i3, i2), block)
+    l1_cache: Option<((usize, usize), BlockData<crate::TreeList<crate::TreeList<crate::BlockRaw>>>)>,
+    // L0 cache: last used ((i3, i2, i1), block)
+    l0_cache: Option<((usize, usize, usize), BlockData<crate::TreeList<crate::BlockRaw>>)>,
+}
+
+impl<'a, D: Disk> CachedReadOnlyContext<'a, D> {
+    pub fn new(fs: &'a mut FileSystem<D>) -> Self {
+        Self {
+            fs,
+            l3_cache: None,
+            l2_cache: None,
+            l1_cache: None,
+            l0_cache: None,
+        }
+    }
+
+    /// Read a block directly from disk
+    fn read_block<T: BlockTrait + core::ops::DerefMut<Target = [u8]>>(
+        &mut self,
+        ptr: BlockPtr<T>,
+    ) -> Result<BlockData<T>> {
+        if ptr.is_null() {
+            #[cfg(feature = "log")]
+            log::error!("CACHED_READ_BLOCK: POINTER IS NULL");
+            return Err(Error::new(ENOENT));
+        }
+
+        let mut data = match T::empty(ptr.addr().level()) {
+            Some(some) => some,
+            None => {
+                #[cfg(feature = "log")]
+                log::error!("CACHED_READ_BLOCK: INVALID BLOCK LEVEL FOR TYPE");
+                return Err(Error::new(ENOENT));
+            }
+        };
+
+        let count = unsafe {
+            self.fs
+                .disk
+                .read_at(self.fs.block + ptr.addr().index(), &mut data)?
+        };
+        if count != data.len() {
+            #[cfg(feature = "log")]
+            log::error!("CACHED_READ_BLOCK: WRONG NUMBER OF BYTES");
+            return Err(Error::new(EIO));
+        }
+
+        self.fs.decrypt(&mut data, ptr.addr());
+
+        let block = BlockData::new(ptr.addr(), data);
+        #[cfg(not(feature = "skip-hash-verify"))]
+        {
+            let block_ptr = block.create_ptr();
+            if block_ptr.hash() != ptr.hash() {
+                #[cfg(feature = "log")]
+                log::error!(
+                    "CACHED_READ_BLOCK: INCORRECT HASH 0x{:X} != 0x{:X} for block 0x{:X}",
+                    block_ptr.hash(),
+                    ptr.hash(),
+                    ptr.addr().index()
+                );
+                return Err(Error::new(EIO));
+            }
+        }
+        Ok(block)
+    }
+
+    /// Walk the tree with caching - uses cached intermediate nodes
+    pub fn read_tree_cached<T: BlockTrait + core::ops::DerefMut<Target = [u8]>>(
+        &mut self,
+        ptr: TreePtr<T>,
+    ) -> Result<TreeData<T>> {
+        if ptr.is_null() {
+            #[cfg(feature = "log")]
+            log::error!("READ_TREE_CACHED: ID IS NULL");
+            return Err(Error::new(ENOENT));
+        }
+
+        let (i3, i2, i1, i0) = ptr.indexes();
+
+        // Ensure L3 (tree root) is cached - always the same
+        if self.l3_cache.is_none() {
+            let l3 = self.read_block(self.fs.header.tree)?;
+            self.l3_cache = Some(l3);
+        }
+
+        // Check L2 cache or load
+        let need_l2 = match &self.l2_cache {
+            Some((cached_i3, _)) if *cached_i3 == i3 => false,
+            _ => true,
+        };
+        if need_l2 {
+            let ptr = self.l3_cache.as_ref().unwrap().data().ptrs[i3];
+            let l2 = self.read_block(ptr)?;
+            self.l2_cache = Some((i3, l2));
+            // Invalidate dependent caches
+            self.l1_cache = None;
+            self.l0_cache = None;
+        }
+
+        // Check L1 cache or load
+        let need_l1 = match &self.l1_cache {
+            Some(((cached_i3, cached_i2), _)) if *cached_i3 == i3 && *cached_i2 == i2 => false,
+            _ => true,
+        };
+        if need_l1 {
+            let ptr = self.l2_cache.as_ref().unwrap().1.data().ptrs[i2];
+            let l1 = self.read_block(ptr)?;
+            self.l1_cache = Some(((i3, i2), l1));
+            // Invalidate dependent cache
+            self.l0_cache = None;
+        }
+
+        // Check L0 cache or load
+        let need_l0 = match &self.l0_cache {
+            Some(((cached_i3, cached_i2, cached_i1), _))
+                if *cached_i3 == i3 && *cached_i2 == i2 && *cached_i1 == i1 =>
+            {
+                false
+            }
+            _ => true,
+        };
+        if need_l0 {
+            let ptr = self.l1_cache.as_ref().unwrap().1.data().ptrs[i1];
+            let l0 = self.read_block(ptr)?;
+            self.l0_cache = Some(((i3, i2, i1), l0));
+        }
+
+        // Get pointer to the actual data block from L0 cache
+        let raw_ptr = self.l0_cache.as_ref().unwrap().1.data().ptrs[i0];
+
+        // Read the actual data block (not cached - these are unique per node)
+        let raw = self.read_block(raw_ptr)?;
+
+        let mut data = match T::empty(BlockLevel::default()) {
+            Some(some) => some,
+            None => {
+                #[cfg(feature = "log")]
+                log::error!("READ_TREE_CACHED: INVALID BLOCK LEVEL FOR TYPE");
+                return Err(Error::new(ENOENT));
+            }
+        };
+        data.copy_from_slice(raw.data());
+
+        Ok(TreeData::new(ptr.id(), data))
+    }
+
+    /// Get child nodes of a directory with caching
+    pub fn child_nodes_cached(
+        &mut self,
+        parent_ptr: TreePtr<crate::Node>,
+        children: &mut Vec<crate::DirEntry>,
+    ) -> Result<()> {
+        let parent = self.read_tree_cached(parent_ptr)?;
+        let level_data = parent.data().level_data().ok_or_else(|| {
+            #[cfg(feature = "log")]
+            log::error!("CHILD_NODES_CACHED: NODE HAS INLINE DATA");
+            Error::new(EIO)
+        })?;
+
+        if level_data.level0[0].is_marker() {
+            let htree_levels = level_data.level0[0].addr().level().0;
+            let root_htree_node = if htree_levels == 0 {
+                let mut fake_htree_node = BlockData::<crate::htree::HTreeNode<crate::RecordRaw>>::empty(BlockAddr::default()).unwrap();
+                let dir_ptr = level_data.level0[1];
+                let htree_ptr = crate::htree::HTreePtr::new(crate::htree::HTreeHash::MAX, dir_ptr);
+                fake_htree_node.data_mut().ptrs[0] = htree_ptr;
+                fake_htree_node
+            } else {
+                let htree_record_ptr = level_data.level0[1];
+                let htree_ptr: BlockPtr<crate::htree::HTreeNode<crate::RecordRaw>> =
+                    unsafe { htree_record_ptr.cast() };
+                self.read_block(htree_ptr)?
+            };
+            self.child_nodes_inner_cached(root_htree_node.data(), children, htree_levels.max(1))?;
+        }
+        Ok(())
+    }
+
+    fn child_nodes_inner_cached(
+        &mut self,
+        htree_node: &crate::htree::HTreeNode<crate::RecordRaw>,
+        children: &mut Vec<crate::DirEntry>,
+        htree_levels: usize,
+    ) -> Result<()> {
+        assert!(htree_levels > 0);
+        if htree_levels == 1 {
+            for entry in htree_node.ptrs.iter().filter(|entry| !entry.is_null()) {
+                let dir_ptr: BlockPtr<crate::DirList> = unsafe { entry.ptr.cast() };
+                let dir = self.read_block(dir_ptr)?;
+                for entry in dir.data().entries() {
+                    children.push(entry);
+                }
+            }
+        } else {
+            for entry in htree_node.ptrs.iter().filter(|entry| !entry.is_null()) {
+                let htree_ptr: BlockPtr<crate::htree::HTreeNode<crate::RecordRaw>> =
+                    unsafe { entry.ptr.cast() };
+                let htree_node = self.read_block(htree_ptr)?;
+                self.child_nodes_inner_cached(htree_node.data(), children, htree_levels - 1)?;
+            }
+        }
+        Ok(())
     }
 }
 
