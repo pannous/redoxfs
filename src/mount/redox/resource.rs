@@ -103,6 +103,7 @@ pub trait Resource<D: Disk> {
 
     fn path(&self) -> &str;
 
+    #[allow(dead_code)]
     fn stat(&self, stat: &mut Stat, tx: &mut Transaction<D>) -> Result<()> {
         let node = tx.read_tree(self.node_ptr())?;
 
@@ -174,6 +175,7 @@ pub trait Resource<D: Disk> {
 }
 
 pub struct Entry {
+    #[allow(dead_code)]
     pub node_ptr: TreePtr<Node>,
     pub name: String,
     pub inode: u64,
