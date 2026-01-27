@@ -84,7 +84,7 @@ std = [
 skip-hash-verify = []
 
 [target.'cfg(not(target_os = "redox"))'.dependencies]
-fuser = { version = "0.16", optional = true }
+fuser = { version = "0.16", optional = true, features = ["libfuse"] }
 
 [target.'cfg(target_os = "redox")'.dependencies]
 libredox = { version = "0.1.11", features = ["call"], optional = true }
