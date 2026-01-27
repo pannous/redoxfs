@@ -36,9 +36,17 @@ where
 {
     let mountpoint = mountpoint.as_ref();
 
-    // Mount options for user ownership
-    // AllowOther allows all users to access the mount
-    // DefaultPermissions enables kernel permission checking based on file modes
+    // Mount options for user ownership on macOS
+    // defer_permissions: allows user to override file ownership/permissions for development
+    // This is needed to write to root-owned files in the mounted filesystem
+    #[cfg(target_os = "macos")]
+    let mount_options = vec![
+        MountOption::FSName("redoxfs".to_string()),
+        MountOption::AutoUnmount,
+        MountOption::CUSTOM("defer_permissions".to_owned()),
+    ];
+
+    #[cfg(not(target_os = "macos"))]
     let mount_options = vec![
         MountOption::FSName("redoxfs".to_string()),
         MountOption::AutoUnmount,
